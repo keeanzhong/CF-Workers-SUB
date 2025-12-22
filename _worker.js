@@ -1,13 +1,14 @@
 /**
- * CF-Workers-SUB 最终修复版
- * 修复内容：
- * 1. 修复 1101 错误 (增强了 Base64 解码的容错性)
- * 2. 包含完整功能：审计记录、可视化后台、一键拉黑/解封
+ * CF-Workers-SUB 最终修复自检版
+ * 功能：
+ * 1. 自动审计：记录订阅请求到 KV
+ * 2. 可视化后台：/admin_panel?p=admin (支持一键拉黑)
+ * 3. 故障自检：自动检测 KV 绑定状态
  */
 
-// --- 基础配置项 ---
+// --- 基础配置 ---
 let mytoken = 'auto'; 
-let adminPassword = 'admin'; // 后台管理密码
+let adminPassword = 'admin'; // 后台密码
 let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6;
 let total = 99; 
@@ -18,14 +19,26 @@ let subConfig = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/conf
 let subProtocol = 'https';
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) { // 修复：添加 ctx 参数
         try {
             const url = new URL(request.url);
             const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
             const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
             const userAgent = userAgentHeader.toLowerCase();
+
+            // --- 自检：检查 KV 是否绑定成功 ---
+            // 如果代码找不到 env.KV，会打印当前所有变量供你检查
+            if (!env.KV && url.pathname === '/admin_panel') {
+                const availableVars = Object.keys(env).join(', ');
+                return new Response(`<h1>配置错误：未找到 KV 绑定</h1>
+                <p>代码试图读取变量 <code>KV</code>，但未找到。</p>
+                <p>当前生效的变量有：<strong>${availableVars}</strong></p>
+                <p>请去 Cloudflare 设置 -> 变量和机密 -> KV 命名空间绑定，确保变量名称准确填写的 <strong>KV</strong> (必须大写，无空格)。</p>
+                <p>绑定后，请尝试在“部署”标签页重新部署一次代码。</p>`, 
+                { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+            }
             
-            // --- 功能 1：动态黑名单检查 ---
+            // --- 功能 1：黑名单拦截 ---
             if (env.KV) {
                 const blacklistData = await env.KV.get('BLACKLIST_IPS');
                 const blacklist = blacklistData ? blacklistData.split(',') : [];
@@ -34,12 +47,12 @@ export default {
                 }
             }
 
-            // --- 功能 2：可视化后台管理 ---
+            // --- 功能 2：可视化后台 ---
             if (url.pathname === '/admin_panel') {
                 const pwd = url.searchParams.get('p');
                 if (pwd !== (env.ADMIN_PWD || adminPassword)) return new Response('Unauthorized', { status: 401 });
                 
-                // 处理 API 请求
+                // 处理一键拉黑/解封
                 const action = url.searchParams.get('action');
                 const targetIp = url.searchParams.get('ip');
                 if (action && targetIp && env.KV) {
@@ -71,16 +84,12 @@ export default {
             const fakeToken = await MD5MD5(`${mytoken}${timeTemp}`);
             const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
             
-            // 验证请求是否合法
             const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
 
-            // --- 功能 3：审计日志 ---
+            // --- 功能 3：审计日志 (使用 ctx.waitUntil 防止阻塞) ---
             if (isValidRequest && env.KV && !userAgent.includes('mozilla')) {
-                // 异步记录，不阻塞主线程
                 const logPromise = recordLog(env, clientIP, userAgentHeader, token || 'PathMode', url, request.cf);
-                // Cloudflare Workers 中建议使用 waitUntil
-                if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise); 
-                else await logPromise; 
+                if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise);
             }
 
             // --- 核心业务逻辑 ---
@@ -89,7 +98,7 @@ export default {
                 if (env.URL302) return Response.redirect(env.URL302, 302);
                 return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             } else {
-                // KV 编辑页面 (浏览器访问)
+                // KV 编辑页面
                 if (env.KV && userAgent.includes('mozilla') && !url.search) {
                     return await KV(request, env, 'LINK.txt', guestToken, mytoken, FileName);
                 }
@@ -103,7 +112,6 @@ export default {
                     else v2rayNodes += x + '\n';
                 }
 
-                // 处理外部订阅链接
                 let remoteNodes = "";
                 let subConverterURLPart = "";
                 if (subLinks.length > 0) {
@@ -133,12 +141,12 @@ export default {
                 }
             }
         } catch (e) {
-            return new Response(`Error: ${e.message}`, { status: 500 });
+            return new Response(`Error detected: ${e.message}\nStack: ${e.stack}`, { status: 500 });
         }
     }
 };
 
-// --- 工具函数 (已增强容错性) ---
+// --- 工具函数 ---
 
 async function recordLog(env, ip, ua, token, url, cf) {
     try {
@@ -153,6 +161,7 @@ async function recordLog(env, ip, ua, token, url, cf) {
 }
 
 async function handleAdminPanel(env) {
+    // 这里如果 env.KV 不存在，上面已经拦截了，所以这里是安全的
     const list = await env.KV.list({ prefix: 'LOG_', limit: 100 });
     const blacklistData = await env.KV.get('BLACKLIST_IPS');
     const blacklist = blacklistData ? blacklistData.split(',') : [];
@@ -178,6 +187,7 @@ async function handleAdminPanel(env) {
     </style></head>
     <body><div class="card">
         <h2>节点使用审计 (最近100条)</h2>
+        <p>当前黑名单IP数: ${blacklist.length}</p>
         <table><thead><tr><th>时间</th><th>IP</th><th>地区</th><th>标识</th><th>操作</th></tr></thead>
         <tbody>${logs.map(l => `<tr>
             <td>${l.time}</td>
@@ -215,27 +225,17 @@ async function getSUB(api, request, 追加UA, userAgentHeader) {
     return [newapi, subURLs];
 }
 
-// 安全的 Base64 解码，防止 1101 崩溃
 function safeBase64Decode(str) {
     if (!str) return "";
     try {
-        // 移除空白字符
         str = str.replace(/\s/g, '');
-        // 补全 padding
-        if (str.length % 4 !== 0) {
-            str += "=".repeat(4 - (str.length % 4));
-        }
+        if (str.length % 4 !== 0) str += "=".repeat(4 - (str.length % 4));
         return decodeURIComponent(escape(atob(str)));
-    } catch (e) {
-        // 如果解码失败，返回原始内容（防止脚本崩溃）
-        return str; 
-    }
+    } catch (e) { return str; }
 }
 
 function safeBase64Encode(str) {
-    try {
-        return btoa(unescape(encodeURIComponent(str)));
-    } catch(e) { return ""; }
+    try { return btoa(unescape(encodeURIComponent(str))); } catch(e) { return ""; }
 }
 
 async function MD5MD5(text) {
