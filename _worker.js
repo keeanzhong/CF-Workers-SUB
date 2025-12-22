@@ -1,13 +1,13 @@
 /**
- * CF-Workers-SUB 增强版 (最终加固版)
- * 1. 实时审计：记录所有订阅访问到 KV
- * 2. 可视化：/admin_panel?p=管理密码 (支持一键拉黑/解封)
- * 3. 动态黑名单：数据存入 KV，无需频繁修改代码
+ * CF-Workers-SUB 最终修复版
+ * 修复内容：
+ * 1. 修复 1101 错误 (增强了 Base64 解码的容错性)
+ * 2. 包含完整功能：审计记录、可视化后台、一键拉黑/解封
  */
 
-// --- 基础配置项 (根据需要修改) ---
+// --- 基础配置项 ---
 let mytoken = 'auto'; 
-let adminPassword = 'admin'; // 管理后台密码
+let adminPassword = 'admin'; // 后台管理密码
 let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6;
 let total = 99; 
@@ -19,127 +19,144 @@ let subProtocol = 'https';
 
 export default {
     async fetch(request, env) {
-        const url = new URL(request.url);
-        const clientIP = request.headers.get('CF-Connecting-IP');
-        const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
-        const userAgent = userAgentHeader.toLowerCase();
-        
-        // --- 功能 1：黑名单拦截检查 ---
-        if (env.KV) {
-            const blacklist = await env.KV.get('BLACKLIST_IPS') || "";
-            if (blacklist.split(',').includes(clientIP)) {
-                return new Response('Access Denied: Your IP has been blacklisted.', { status: 403 });
-            }
-        }
-
-        // --- 功能 2：管理后台及 API ---
-        if (url.pathname === '/admin_panel') {
-            const pwd = url.searchParams.get('p');
-            if (pwd !== (env.ADMIN_PWD || adminPassword)) return new Response('Unauthorized', { status: 401 });
+        try {
+            const url = new URL(request.url);
+            const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
+            const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
+            const userAgent = userAgentHeader.toLowerCase();
             
-            // 一键拉黑/解封接口
-            const action = url.searchParams.get('action');
-            const targetIp = url.searchParams.get('ip');
-            if (action && targetIp && env.KV) {
-                let currentList = (await env.KV.get('BLACKLIST_IPS') || "").split(',').filter(x => x);
-                if (action === 'block' && !currentList.includes(targetIp)) {
-                    currentList.push(targetIp);
-                } else if (action === 'unblock') {
-                    currentList = currentList.filter(ip => ip !== targetIp);
+            // --- 功能 1：动态黑名单检查 ---
+            if (env.KV) {
+                const blacklistData = await env.KV.get('BLACKLIST_IPS');
+                const blacklist = blacklistData ? blacklistData.split(',') : [];
+                if (blacklist.includes(clientIP)) {
+                    return new Response('Access Denied: Your IP has been blacklisted.', { status: 403 });
                 }
-                await env.KV.put('BLACKLIST_IPS', currentList.join(','));
-                return new Response('Success');
-            }
-            return await handleAdminPanel(env);
-        }
-
-        // --- 变量初始化 ---
-        mytoken = env.TOKEN || mytoken;
-        let BotToken = env.TGTOKEN || '';
-        let ChatID = env.TGID || '';
-        let TG = env.TG || 0;
-        subConverter = env.SUBAPI || subConverter;
-        subConfig = env.SUBCONFIG || subConfig;
-        FileName = env.SUBNAME || FileName;
-
-        const token = url.searchParams.get('token');
-        const timeTemp = Math.ceil(new Date().setHours(0,0,0,0) / 1000);
-        const fakeToken = await MD5MD5(`${mytoken}${timeTemp}`);
-        const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
-        const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
-
-        // --- 功能 3：访问审计记录 ---
-        if (isValidRequest && env.KV && !userAgent.includes('mozilla')) {
-            await recordLog(env, clientIP, userAgentHeader, token || 'PathMode', url, request.cf);
-        }
-
-        // --- 核心业务逻辑 ---
-        if (!isValidRequest) {
-            if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(BotToken, ChatID, `#异常访问`, clientIP, `UA: ${userAgentHeader}\n路径: ${url.pathname}`);
-            if (env.URL302) return Response.redirect(env.URL302, 302);
-            return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
-        } else {
-            // KV 编辑页面
-            if (env.KV && userAgent.includes('mozilla') && !url.search) {
-                return await KV(request, env, 'LINK.txt', guestToken, mytoken, FileName);
             }
 
-            // 获取并合并链接
-            let finalData = (env.KV ? await env.KV.get('LINK.txt') : env.LINK) || MainData;
-            let links = await ADD(finalData);
-            let v2rayNodes = ""; let subLinks = [];
-            for (let x of links) {
-                if (x.toLowerCase().startsWith('http')) subLinks.push(x);
-                else v2rayNodes += x + '\n';
+            // --- 功能 2：可视化后台管理 ---
+            if (url.pathname === '/admin_panel') {
+                const pwd = url.searchParams.get('p');
+                if (pwd !== (env.ADMIN_PWD || adminPassword)) return new Response('Unauthorized', { status: 401 });
+                
+                // 处理 API 请求
+                const action = url.searchParams.get('action');
+                const targetIp = url.searchParams.get('ip');
+                if (action && targetIp && env.KV) {
+                    let currentData = await env.KV.get('BLACKLIST_IPS');
+                    let currentList = currentData ? currentData.split(',') : [];
+                    
+                    if (action === 'block') {
+                        if (!currentList.includes(targetIp)) currentList.push(targetIp);
+                    } else if (action === 'unblock') {
+                        currentList = currentList.filter(ip => ip !== targetIp);
+                    }
+                    await env.KV.put('BLACKLIST_IPS', currentList.join(','));
+                    return new Response('Success');
+                }
+                return await handleAdminPanel(env);
             }
 
-            // 获取远程订阅内容
-            let remoteNodes = "";
-            let subConverterURLPart = "";
-            if (subLinks.length > 0) {
-                const subResult = await getSUB(subLinks, request, "v2rayn", userAgentHeader);
-                remoteNodes = subResult[0].join('\n');
-                subConverterURLPart = subResult[1];
+            // --- 变量初始化 ---
+            mytoken = env.TOKEN || mytoken;
+            let BotToken = env.TGTOKEN || '';
+            let ChatID = env.TGID || '';
+            let TG = env.TG || 0;
+            subConverter = env.SUBAPI || subConverter;
+            subConfig = env.SUBCONFIG || subConfig;
+            FileName = env.SUBNAME || FileName;
+
+            const token = url.searchParams.get('token');
+            const timeTemp = Math.ceil(new Date().setHours(0,0,0,0) / 1000);
+            const fakeToken = await MD5MD5(`${mytoken}${timeTemp}`);
+            const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
+            
+            // 验证请求是否合法
+            const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
+
+            // --- 功能 3：审计日志 ---
+            if (isValidRequest && env.KV && !userAgent.includes('mozilla')) {
+                // 异步记录，不阻塞主线程
+                const logPromise = recordLog(env, clientIP, userAgentHeader, token || 'PathMode', url, request.cf);
+                // Cloudflare Workers 中建议使用 waitUntil
+                if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise); 
+                else await logPromise; 
             }
 
-            let totalContent = v2rayNodes + remoteNodes;
-            let format = url.searchParams.has('clash') || userAgent.includes('clash') ? 'clash' : 
-                         (url.searchParams.has('sb') || userAgent.includes('sing-box') ? 'singbox' : 'base64');
-
-            if (format === 'base64') {
-                const responseHeaders = { 
-                    "content-type": "text/plain; charset=utf-8",
-                    "Profile-Update-Interval": `${SUBUpdateTime}`,
-                    "Subscription-Userinfo": `upload=0; download=0; total=${total * 1073741824}; expire=${timestamp / 1000}`
-                };
-                return new Response(btoa(unescape(encodeURIComponent(totalContent))), { headers: responseHeaders });
+            // --- 核心业务逻辑 ---
+            if (!isValidRequest) {
+                if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(BotToken, ChatID, `#异常访问`, clientIP, `UA: ${userAgentHeader}\n路径: ${url.pathname}`);
+                if (env.URL302) return Response.redirect(env.URL302, 302);
+                return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             } else {
-                let subURL = `${url.origin}/sub?token=${fakeToken}|${subConverterURLPart}`;
-                let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true`;
-                const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgentHeader } });
-                let content = await subResp.text();
-                if (format === 'clash') content = await clashFix(content);
-                return new Response(content, { headers: { "content-type": "text/plain; charset=utf-8" } });
+                // KV 编辑页面 (浏览器访问)
+                if (env.KV && userAgent.includes('mozilla') && !url.search) {
+                    return await KV(request, env, 'LINK.txt', guestToken, mytoken, FileName);
+                }
+
+                // 获取节点数据
+                let finalData = (env.KV ? await env.KV.get('LINK.txt') : env.LINK) || MainData;
+                let links = await ADD(finalData);
+                let v2rayNodes = ""; let subLinks = [];
+                for (let x of links) {
+                    if (x.toLowerCase().startsWith('http')) subLinks.push(x);
+                    else v2rayNodes += x + '\n';
+                }
+
+                // 处理外部订阅链接
+                let remoteNodes = "";
+                let subConverterURLPart = "";
+                if (subLinks.length > 0) {
+                    const subResult = await getSUB(subLinks, request, "v2rayn", userAgentHeader);
+                    remoteNodes = subResult[0].join('\n');
+                    subConverterURLPart = subResult[1];
+                }
+
+                let totalContent = v2rayNodes + remoteNodes;
+                let format = url.searchParams.has('clash') || userAgent.includes('clash') ? 'clash' : 
+                             (url.searchParams.has('sb') || userAgent.includes('sing-box') ? 'singbox' : 'base64');
+
+                if (format === 'base64') {
+                    const responseHeaders = { 
+                        "content-type": "text/plain; charset=utf-8",
+                        "Profile-Update-Interval": `${SUBUpdateTime}`,
+                        "Subscription-Userinfo": `upload=0; download=0; total=${total * 1073741824}; expire=${timestamp / 1000}`
+                    };
+                    return new Response(safeBase64Encode(totalContent), { headers: responseHeaders });
+                } else {
+                    let subURL = `${url.origin}/sub?token=${fakeToken}|${subConverterURLPart}`;
+                    let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true`;
+                    const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgentHeader } });
+                    let content = await subResp.text();
+                    if (format === 'clash') content = clashFix(content);
+                    return new Response(content, { headers: { "content-type": "text/plain; charset=utf-8" } });
+                }
             }
+        } catch (e) {
+            return new Response(`Error: ${e.message}`, { status: 500 });
         }
     }
 };
 
-// --- 工具函数补全 (核心依赖) ---
+// --- 工具函数 (已增强容错性) ---
 
 async function recordLog(env, ip, ua, token, url, cf) {
-    const logKey = `LOG_${Date.now()}`;
-    const logData = {
-        time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-        ip: ip, loc: cf ? `${cf.country || ''}-${cf.city || ''}` : 'Unknown',
-        ua: ua, token: token, path: url.pathname + url.search
-    };
-    await env.KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
+    try {
+        const logKey = `LOG_${Date.now()}`;
+        const logData = {
+            time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+            ip: ip, loc: cf ? `${cf.country || ''}-${cf.city || ''}` : 'Unknown',
+            ua: ua, token: token, path: url.pathname + url.search
+        };
+        await env.KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
+    } catch(e) { console.log('Log error:', e); }
 }
 
 async function handleAdminPanel(env) {
     const list = await env.KV.list({ prefix: 'LOG_', limit: 100 });
-    const blacklist = (await env.KV.get('BLACKLIST_IPS') || "").split(',');
+    const blacklistData = await env.KV.get('BLACKLIST_IPS');
+    const blacklist = blacklistData ? blacklistData.split(',') : [];
+    
     let logs = [];
     for (const key of list.keys) {
         const val = await env.KV.get(key.name);
@@ -186,23 +203,39 @@ async function handleAdminPanel(env) {
 
 async function getSUB(api, request, 追加UA, userAgentHeader) {
     let newapi = []; let subURLs = "";
-    const responses = await Promise.allSettled(api.map(url => fetch(url, { headers: { "User-Agent": `v2rayN/6.45 ${追加UA}(${userAgentHeader})` } }).then(r => r.ok ? r.text() : "")));
-    for (const [i, r] of responses.entries()) {
-        if (r.status === 'fulfilled' && r.value) {
-            if (r.value.includes('proxies:')) subURLs += "|" + api[i];
-            else newapi.push(r.value.includes('://') ? r.value : await base64Decode(r.value));
+    try {
+        const responses = await Promise.allSettled(api.map(url => fetch(url, { headers: { "User-Agent": `v2rayN/6.45 ${追加UA}(${userAgentHeader})` } }).then(r => r.ok ? r.text() : "")));
+        for (const [i, r] of responses.entries()) {
+            if (r.status === 'fulfilled' && r.value) {
+                if (r.value.includes('proxies:')) subURLs += "|" + api[i];
+                else newapi.push(r.value.includes('://') ? r.value : safeBase64Decode(r.value));
+            }
         }
-    }
+    } catch(e) { console.error(e); }
     return [newapi, subURLs];
 }
 
-async function base64Decode(str) {
+// 安全的 Base64 解码，防止 1101 崩溃
+function safeBase64Decode(str) {
+    if (!str) return "";
     try {
-        let binary = atob(str.replace(/\s/g, ''));
-        let bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return new TextDecoder('utf-8').decode(bytes);
-    } catch (e) { return ""; }
+        // 移除空白字符
+        str = str.replace(/\s/g, '');
+        // 补全 padding
+        if (str.length % 4 !== 0) {
+            str += "=".repeat(4 - (str.length % 4));
+        }
+        return decodeURIComponent(escape(atob(str)));
+    } catch (e) {
+        // 如果解码失败，返回原始内容（防止脚本崩溃）
+        return str; 
+    }
+}
+
+function safeBase64Encode(str) {
+    try {
+        return btoa(unescape(encodeURIComponent(str)));
+    } catch(e) { return ""; }
 }
 
 async function MD5MD5(text) {
@@ -211,11 +244,11 @@ async function MD5MD5(text) {
     return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function ADD(envadd) { return envadd.split(/[	"'|\r\n]+/).filter(x => x.trim() !== ""); }
+async function ADD(envadd) { return (envadd || "").split(/[	"'|\r\n]+/).filter(x => x.trim() !== ""); }
 
 function clashFix(content) { return content.replace(/mtu: 1280, udp: true/g, 'mtu: 1280, remote-dns-resolve: true, udp: true'); }
 
-async function nginx() { return `<h1>Welcome</h1>`; }
+async function nginx() { return `<h1>Welcome to nginx!</h1>`; }
 
 async function sendMessage(token, id, type, ip, data = "") {
     if (!token || !id) return;
