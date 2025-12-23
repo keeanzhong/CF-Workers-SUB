@@ -1,44 +1,40 @@
 /**
- * CF-Workers-SUB 最终修复自检版
- * 功能：
- * 1. 自动审计：记录订阅请求到 KV
- * 2. 可视化后台：/admin_panel?p=admin (支持一键拉黑)
- * 3. 故障自检：自动检测 KV 绑定状态
+ * CF-Workers-SUB 终极合并版 (修复 + 提速 + 审计 + 鉴权)
+ * 1. 修复：包含 ctx 参数和 safeBase64，彻底解决 1101 报错。
+ * 2. 提速：恢复了 scv, tfo, fdn 等关键参数，解决节点连接慢/超时问题。
+ * 3. 功能：包含一键拉黑、审计日志、可视化后台。
  */
 
 // --- 基础配置 ---
 let mytoken = 'auto'; 
-let adminPassword = 'admin'; // 后台密码
+let adminPassword = 'admin'; // 后台管理密码
 let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6;
 let total = 99; 
 let timestamp = 4102329600000; 
-let MainData = `https://cfxr.eu.org/getSub`; 
+let MainData = `https://cfxr.eu.org/getSub`;  // 默认节点源
 let subConverter = "SUBAPI.cmliussss.net"; 
 let subConfig = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/config/ACL4SSR_Online_MultiCountry.ini";
 let subProtocol = 'https';
 
 export default {
-    async fetch(request, env, ctx) { // 修复：添加 ctx 参数
+    async fetch(request, env, ctx) { // 核心修复：保留 ctx 参数
         try {
             const url = new URL(request.url);
             const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
             const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
             const userAgent = userAgentHeader.toLowerCase();
 
-            // --- 自检：检查 KV 是否绑定成功 ---
-            // 如果代码找不到 env.KV，会打印当前所有变量供你检查
+            // --- 1. 故障自检：检查 KV 是否绑定成功 ---
             if (!env.KV && url.pathname === '/admin_panel') {
-                const availableVars = Object.keys(env).join(', ');
                 return new Response(`<h1>配置错误：未找到 KV 绑定</h1>
                 <p>代码试图读取变量 <code>KV</code>，但未找到。</p>
-                <p>当前生效的变量有：<strong>${availableVars}</strong></p>
                 <p>请去 Cloudflare 设置 -> 变量和机密 -> KV 命名空间绑定，确保变量名称准确填写的 <strong>KV</strong> (必须大写，无空格)。</p>
                 <p>绑定后，请尝试在“部署”标签页重新部署一次代码。</p>`, 
                 { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
             }
             
-            // --- 功能 1：黑名单拦截 ---
+            // --- 2. 黑名单拦截 ---
             if (env.KV) {
                 const blacklistData = await env.KV.get('BLACKLIST_IPS');
                 const blacklist = blacklistData ? blacklistData.split(',') : [];
@@ -47,12 +43,12 @@ export default {
                 }
             }
 
-            // --- 功能 2：可视化后台 ---
+            // --- 3. 可视化后台管理 ---
             if (url.pathname === '/admin_panel') {
                 const pwd = url.searchParams.get('p');
                 if (pwd !== (env.ADMIN_PWD || adminPassword)) return new Response('Unauthorized', { status: 401 });
                 
-                // 处理一键拉黑/解封
+                // 处理一键拉黑/解封 API
                 const action = url.searchParams.get('action');
                 const targetIp = url.searchParams.get('ip');
                 if (action && targetIp && env.KV) {
@@ -86,7 +82,7 @@ export default {
             
             const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
 
-            // --- 功能 3：审计日志 (使用 ctx.waitUntil 防止阻塞) ---
+            // --- 4. 审计日志 (非阻塞) ---
             if (isValidRequest && env.KV && !userAgent.includes('mozilla')) {
                 const logPromise = recordLog(env, clientIP, userAgentHeader, token || 'PathMode', url, request.cf);
                 if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise);
@@ -98,7 +94,7 @@ export default {
                 if (env.URL302) return Response.redirect(env.URL302, 302);
                 return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             } else {
-                // KV 编辑页面
+                // KV 编辑页面 (浏览器访问)
                 if (env.KV && userAgent.includes('mozilla') && !url.search) {
                     return await KV(request, env, 'LINK.txt', guestToken, mytoken, FileName);
                 }
@@ -132,8 +128,10 @@ export default {
                     };
                     return new Response(safeBase64Encode(totalContent), { headers: responseHeaders });
                 } else {
+                    // ★★★ 提速关键点：加入了 tfo, scv, fdn 等参数，确保节点连接兼容性 ★★★
                     let subURL = `${url.origin}/sub?token=${fakeToken}|${subConverterURLPart}`;
-                    let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true`;
+                    let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
+                    
                     const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgentHeader } });
                     let content = await subResp.text();
                     if (format === 'clash') content = clashFix(content);
@@ -146,7 +144,7 @@ export default {
     }
 };
 
-// --- 工具函数 ---
+// --- 工具函数 (增强容错) ---
 
 async function recordLog(env, ip, ua, token, url, cf) {
     try {
@@ -161,7 +159,6 @@ async function recordLog(env, ip, ua, token, url, cf) {
 }
 
 async function handleAdminPanel(env) {
-    // 这里如果 env.KV 不存在，上面已经拦截了，所以这里是安全的
     const list = await env.KV.list({ prefix: 'LOG_', limit: 100 });
     const blacklistData = await env.KV.get('BLACKLIST_IPS');
     const blacklist = blacklistData ? blacklistData.split(',') : [];
@@ -234,30 +231,22 @@ function safeBase64Decode(str) {
     } catch (e) { return str; }
 }
 
-function safeBase64Encode(str) {
-    try { return btoa(unescape(encodeURIComponent(str))); } catch(e) { return ""; }
-}
-
-async function MD5MD5(text) {
-    const data = new TextEncoder().encode(text);
-    const hash = await crypto.subtle.digest('MD5', data);
-    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
+function safeBase64Encode(str) { try { return btoa(unescape(encodeURIComponent(str))); } catch(e) { return ""; } }
+async function MD5MD5(text) { const data = new TextEncoder().encode(text); const hash = await crypto.subtle.digest('MD5', data); return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join(''); }
 async function ADD(envadd) { return (envadd || "").split(/[	"'|\r\n]+/).filter(x => x.trim() !== ""); }
-
 function clashFix(content) { return content.replace(/mtu: 1280, udp: true/g, 'mtu: 1280, remote-dns-resolve: true, udp: true'); }
-
 async function nginx() { return `<h1>Welcome to nginx!</h1>`; }
-
-async function sendMessage(token, id, type, ip, data = "") {
-    if (!token || !id) return;
-    try { await fetch(`https://api.telegram.org/bot${token}/sendMessage?chat_id=${id}&text=${encodeURIComponent(type + '\nIP: ' + ip + '\n' + data)}`); } catch (e) {}
-}
+async function sendMessage(token, id, type, ip, data = "") { if (!token || !id) return; try { await fetch(`https://api.telegram.org/bot${token}/sendMessage?chat_id=${id}&text=${encodeURIComponent(type + '\nIP: ' + ip + '\n' + data)}`); } catch (e) {} }
 
 async function KV(request, env, txt, guest, mytoken, FileName) {
     const url = new URL(request.url);
     if (request.method === "POST") { await env.KV.put(txt, await request.text()); return new Response("保存成功"); }
     let content = await env.KV.get(txt) || '';
-    return new Response(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="padding:20px;"><h2>订阅编辑</h2><p>订阅地址: <code>https://${url.hostname}/${mytoken}</code></p><textarea id="c" style="width:100%;height:400px;">${content}</textarea><br><button onclick="save()" style="margin-top:10px;padding:10px 20px;background:#28a745;color:white;border:none;cursor:pointer;">保存配置</button><script>function save(){fetch(window.location.href,{method:'POST',body:document.getElementById('c').value}).then(r=>r.text()).then(t=>alert(t));}</script></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+    return new Response(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="padding:20px;"><h2>订阅编辑</h2>
+    <p>订阅地址: <code>https://${url.hostname}/${mytoken}</code></p>
+    <p style="color:red">提示：请填入你自己的节点链接（一行一个），默认节点速度可能较慢。</p>
+    <textarea id="c" style="width:100%;height:400px;border:1px solid #ccc;padding:10px;">${content}</textarea><br>
+    <button onclick="save()" style="margin-top:10px;padding:10px 20px;background:#28a745;color:white;border:none;cursor:pointer;">保存配置</button>
+    <script>function save(){fetch(window.location.href,{method:'POST',body:document.getElementById('c').value}).then(r=>r.text()).then(t=>alert(t));}</script>
+    </body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
