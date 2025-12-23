@@ -1,7 +1,8 @@
 /**
- * CF-Workers-SUB 审计修正版
- * 1. 移除浏览器过滤：无论用什么客户端，统统记录日志。
- * 2. 保持所有功能：多用户ID、一键拉黑、节点提速。
+ * CF-Workers-SUB 强制调试版
+ * 1. 强制同步写入 KV (await)，确保日志必录。
+ * 2. 禁用 HTTP 缓存，防止 Worker 不运行。
+ * 3. 开启 Console 日志，方便后台排查。
  */
 
 // --- 基础配置 ---
@@ -18,22 +19,22 @@ let subProtocol = 'https';
 
 export default {
     async fetch(request, env, ctx) {
+        // console.log("请求进入: " + request.url); // 调试日志
         try {
             const url = new URL(request.url);
             const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
             const userAgent = (request.headers.get('User-Agent') || "Unknown").toLowerCase();
             const userID = url.searchParams.get('id') || url.searchParams.get('user') || 'default';
 
-            // 1. 自检
+            // 1. 检查 KV
             if (!env.KV && url.pathname === '/admin_panel') {
-                return new Response(`<h1>配置错误：未找到 KV 绑定</h1>`, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+                return new Response(`配置错误：未找到 KV 绑定`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
             
             // 2. 黑名单
             if (env.KV) {
                 const blIP = (await env.KV.get('BLACKLIST_IPS') || "").split(',');
                 if (blIP.includes(clientIP)) return new Response('Access Denied (IP Blocked).', { status: 403 });
-                
                 const blID = (await env.KV.get('BLACKLIST_IDS') || "").split(',');
                 if (userID !== 'default' && blID.includes(userID)) return new Response('Access Denied (User Blocked).', { status: 403 });
             }
@@ -46,7 +47,6 @@ export default {
                 const act = url.searchParams.get('action');
                 const val = url.searchParams.get('val');
                 const type = url.searchParams.get('type');
-                
                 if (act && val && env.KV) {
                     const key = type === 'id' ? 'BLACKLIST_IDS' : 'BLACKLIST_IPS';
                     let list = (await env.KV.get(key) || "").split(',').filter(x => x);
@@ -72,16 +72,18 @@ export default {
             const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
             const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
 
-            // --- 4. 审计日志 (已移除 mozilla 过滤，强制记录) ---
-            // 只要是有效请求且 KV 存在，就记录，不管 User-Agent 是什么
+            // --- 4. 强制同步审计 (DEBUG 核心) ---
+            // 只要有 KV，不判断 User-Agent，强制写入，并且使用 await 等待写入完成
             if (isValidRequest && env.KV) {
-                const logPromise = recordLog(env, clientIP, userID, userAgent, url, request.cf);
-                if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise);
+                console.log(`正在记录日志: IP=${clientIP}, User=${userID}`); // 调试日志
+                await recordLog(env, clientIP, userID, userAgent, url, request.cf);
+                console.log(`日志写入完成`); // 调试日志
+            } else {
+                console.log(`不记录日志: Valid=${isValidRequest}, KV=${!!env.KV}`);
             }
 
             // 核心业务
             if (!isValidRequest) {
-                if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") await sendMessage(BotToken, ChatID, `#异常访问`, clientIP, `User: ${userID}\nPath: ${url.pathname}`);
                 if (env.URL302) return Response.redirect(env.URL302, 302);
                 return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             } else {
@@ -109,24 +111,34 @@ export default {
                 let format = url.searchParams.has('clash') || userAgent.includes('clash') ? 'clash' : 
                              (url.searchParams.has('sb') || userAgent.includes('sing-box') ? 'singbox' : 'base64');
 
+                let responseContent = "";
+                let contentType = "text/plain; charset=utf-8";
+
                 if (format === 'base64') {
-                    const responseHeaders = { 
-                        "content-type": "text/plain; charset=utf-8", 
-                        "Profile-Update-Interval": `${SUBUpdateTime}`,
-                        "Subscription-Userinfo": `upload=0; download=0; total=${total * 1073741824}; expire=${timestamp / 1000}`
-                    };
-                    return new Response(safeBase64Encode(totalContent), { headers: responseHeaders });
+                    responseContent = safeBase64Encode(totalContent);
                 } else {
                     let subURL = `${url.origin}/sub?token=${fakeToken}|${subConverterURLPart}`;
                     let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
                     const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgent } });
-                    let content = await subResp.text();
-                    if (format === 'clash') content = clashFix(content);
-                    return new Response(content, { headers: { "content-type": "text/plain; charset=utf-8" } });
+                    responseContent = await subResp.text();
+                    if (format === 'clash') responseContent = clashFix(responseContent);
                 }
+
+                // 添加禁止缓存头
+                return new Response(responseContent, { 
+                    headers: { 
+                        "content-type": contentType,
+                        "Profile-Update-Interval": `${SUBUpdateTime}`,
+                        "Subscription-Userinfo": `upload=0; download=0; total=${total * 1073741824}; expire=${timestamp / 1000}`,
+                        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // 强制不缓存
+                        "Pragma": "no-cache",
+                        "Expires": "0"
+                    } 
+                });
             }
         } catch (e) {
-            return new Response(`Error: ${e.message}`, { status: 500 });
+            console.error(e); // 报错输出到后台
+            return new Response(`Error: ${e.message}\n${e.stack}`, { status: 500 });
         }
     }
 };
@@ -134,7 +146,7 @@ export default {
 // --- 工具函数 ---
 async function recordLog(env, ip, userID, ua, url, cf) {
     try {
-        const logKey = `LOG_${Date.now()}`;
+        const logKey = `LOG_${Date.now()}_${Math.random().toString(36).substring(7)}`; // 防止Key冲突
         const logData = {
             time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
             ip: ip, 
@@ -144,7 +156,7 @@ async function recordLog(env, ip, userID, ua, url, cf) {
             path: url.pathname + url.search
         };
         await env.KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
-    } catch(e) {}
+    } catch(e) { console.error("KV Write Error: " + e.message); }
 }
 
 async function handleAdminPanel(env) {
@@ -160,11 +172,11 @@ async function handleAdminPanel(env) {
     logs.sort((a, b) => new Date(b.time) - new Date(a.time));
 
     return new Response(`
-    <!DOCTYPE html><html><head><title>审计后台</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <!DOCTYPE html><html><head><title>调试后台</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <style>body{font-family:sans-serif;background:#f4f7f9;padding:20px}.card{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:1200px;margin:auto}table{width:100%;border-collapse:collapse;margin-top:15px}th,td{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:13px}th{background:#007bff;color:white}.btn{padding:4px 8px;border:none;border-radius:4px;color:white;cursor:pointer;font-size:12px;margin-right:5px}.block{background:#dc3545}.unblock{background:#28a745}.tag{padding:2px 5px;border-radius:3px;font-size:11px;background:#e9ecef;color:#495057}.b-tag{background:#dc3545;color:white}</style></head>
     <body><div class="card">
-        <h2>👥 用户使用审计</h2>
-        <p>当前记录数: ${logs.length} (无过滤模式)</p>
+        <h2>📊 节点使用审计 (DEBUG模式)</h2>
+        <p>如果这里有数据，说明 KV 写入正常。如果 v2rayN 更新成功但这里没数据，请看 Cloudflare 实时日志。</p>
         <table><thead><tr><th>时间</th><th>用户ID</th><th>IP地址</th><th>客户端UA</th><th>操作</th></tr></thead>
         <tbody>${logs.map(l => {
             const isBlockID = blID.includes(l.user);
