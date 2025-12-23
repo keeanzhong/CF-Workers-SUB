@@ -1,13 +1,13 @@
 // ================================================================
-// 1. 用户配置区域
+// 1. 静态配置区域 (只放不依赖 env 的常量)
 // ================================================================
 const defaultUUID = '90204786-9045-420c-b2b9-293026330025'; // 默认 UUID
 const proxyIP = ''; // 优选 IP，留空自动
 const adminPath = '/admin'; // 管理后台路径
-const adminKey = 'zyk20031230'; // <--- 【重要】请修改这个管理密码
+const adminKey = 'MySecretKey123'; // <--- 【重要】请修改这个管理密码
 
 // ================================================================
-// 2. 备用节点列表
+// 2. 备用节点列表 (完整版，保留所有备用路径)
 // ================================================================
 let addresses = [
 	'www.visa.com.sg',
@@ -22,7 +22,14 @@ let addresses = [
 	'telegram.org',
 	'ip.sb',
 	'csgo.com',
-	'www.cloudflare.com'
+	'www.cloudflare.com',
+    'www.apple.com',
+    'www.amazon.com',
+    'www.microsoft.com',
+    'www.google.com',
+    'www.baidu.com',
+    'www.alibaba.com',
+    'www.tencent.com'
 ];
 
 let addressesapi = [
@@ -49,7 +56,8 @@ const NODE_BLOCK_MSG = 'Service Unavailable: Target node is banned.';
 // ================================================================
 export default {
 	async fetch(request, env, ctx) {
-		// 【关键修复】在函数内部获取 UUID，解决 env is not defined 报错
+		// 【关键修复】env 必须在 fetch 函数内部调用，绝对不能放在文件最开头
+		// 这里会自动读取你 Cloudflare 后台设置的 TOKEN，读不到就用默认的
 		const userID = (env.TOKEN || defaultUUID).toLowerCase();
 		
 		// 【关键修复】自动兼容你设置的 KV 名字 (无论是 'KV' 还是 'KV_BLACKLIST')
@@ -77,25 +85,42 @@ export default {
 		}
 
 		// -------------------------------------------------------------
-		// [模块 C] VLESS 核心业务 (原版逻辑)
+		// [模块 C] VLESS 核心业务
 		// -------------------------------------------------------------
 		if (!upgradeHeader || upgradeHeader !== 'websocket') {
-			// 返回伪装网页
+			// 返回伪装网页 (Dashboard)
 			return new Response(`
 			<!DOCTYPE html>
 			<html>
 			<head>
-			<title>Welcome to nginx!</title>
+			<title>Worker Dashboard</title>
 			<style>
-				body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
+				body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; padding: 20px; }
+				.status { color: green; font-weight: bold; }
+				.error { color: red; font-weight: bold; }
+				pre { background: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; }
 			</style>
 			</head>
 			<body>
-			<h1>Welcome to nginx!</h1>
-			<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
-			<p><em>Client IP: ${clientIP}</em></p>
-			<p><em>UUID: ${userID}</em></p>
-            <p><em>DB Status: ${DB ? 'Connected' : 'Not Connected'}</em></p>
+			<h1>Worker Service Status</h1>
+			<p>Service Status: <span class="status">Running</span></p>
+			<p>Client IP: ${clientIP}</p>
+			<p>Current UUID: ${userID}</p>
+			<p>KV Database: ${DB ? '<span class="status">Connected</span>' : '<span class="error">Not Connected (Check Bindings)</span>'}</p>
+			
+			<hr>
+			<h3>How to use Ban System:</h3>
+			<p>Replace <code>${adminKey}</code> with your secret key.</p>
+			<pre>
+# Ban a User IP (Stop them from accessing):
+https://${url.hostname}${adminPath}/ban?key=${adminKey}&type=user&ip=${clientIP}
+
+# Ban a Target Node (Stop connection to a specific site):
+https://${url.hostname}${adminPath}/ban?key=${adminKey}&type=node&ip=example.com
+
+# Unban:
+https://${url.hostname}${adminPath}/unban?key=${adminKey}&type=user&ip=${clientIP}
+			</pre>
 			</body>
 			</html>`, {
 				status: 200,
@@ -117,29 +142,29 @@ async function handleAdmin(url, DB, correctKey) {
 	const ip = url.searchParams.get("ip");
 	const action = url.pathname.split("/").pop(); 
 
-	if (key !== correctKey) return new Response("Auth Failed", { status: 401 });
-	if (!DB) return new Response("Error: KV Binding Not Found. Please bind KV in settings.", { status: 500 });
-	if (!ip || !type) return new Response("Missing 'ip' or 'type' param", { status: 400 });
+	if (key !== correctKey) return new Response("Auth Failed: Incorrect Key", { status: 401 });
+	if (!DB) return new Response("Error: KV Binding Not Found. Please bind KV in Cloudflare settings.", { status: 500 });
+	if (!ip || !type) return new Response("Missing 'ip' or 'type' parameter", { status: 400 });
 
 	const kvKey = type === 'user' ? `u_${ip}` : `n_${ip}`;
 
 	if (action === 'ban') {
 		await DB.put(kvKey, `Banned at ${new Date().toISOString()}`);
-		return new Response(`🚫 Banned ${type}: ${ip}`, { status: 200 });
+		return new Response(`🚫 Banned [${type}]: ${ip}`, { status: 200 });
 	}
 	if (action === 'unban') {
 		await DB.delete(kvKey);
-		return new Response(`✅ Unbanned ${type}: ${ip}`, { status: 200 });
+		return new Response(`✅ Unbanned [${type}]: ${ip}`, { status: 200 });
 	}
 	if (action === 'check') {
 		const val = await DB.get(kvKey);
 		return new Response(val ? `⚠️ Banned: ${val}` : `🆗 Clean`, { status: 200 });
 	}
-	return new Response("Invalid Action", { status: 400 });
+	return new Response("Invalid Action. Use /ban, /unban, or /check", { status: 400 });
 }
 
 /**
- * VLESS 处理核心逻辑 (保留所有细节)
+ * VLESS 处理核心逻辑 (包含完整的流处理和错误重试)
  */
 async function vlessOverWSHandler(request, userID, proxyIP, DB) {
 	const webSocketPair = new WebSocketPair();
@@ -191,7 +216,7 @@ async function vlessOverWSHandler(request, userID, proxyIP, DB) {
 				return; 
 			}
 
-			// [模块 C-2] 节点黑名单拦截
+			// [核心功能] 节点黑名单检查
 			if (DB) {
 				const isNodeBanned = await DB.get(`n_${addressRemote}`);
 				if (isNodeBanned) {
@@ -231,7 +256,7 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 	}
 
 	async function retry() {
-		// 如果首次连接失败，尝试使用 proxyIP 或者轮询内置 addresses
+		// 随机选择一个备用节点进行重试
 		let retryAddr = proxyIP || addresses[Math.floor(Math.random() * addresses.length)]; 
 		log(`retry connecting to ${retryAddr}...`);
 		
@@ -248,6 +273,10 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		retry();
 	}
 }
+
+// ================================================================
+// 4. 辅助工具函数 (协议解析等)
+// ================================================================
 
 function makeReadableWebSocketStream(webSocket, earlyDataHeader, log) {
 	let readableStreamCancel = false;
