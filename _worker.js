@@ -1,13 +1,13 @@
 /**
- * CF-Workers-SUB 强制调试版
- * 1. 强制同步写入 KV (await)，确保日志必录。
- * 2. 禁用 HTTP 缓存，防止 Worker 不运行。
- * 3. 开启 Console 日志，方便后台排查。
+ * CF-Workers-SUB 旗舰管理版
+ * 1. 异常检测：新增“多IP使用检测”面板，自动揪出分享账号的人。
+ * 2. 手动封禁：保留手动输入封禁功能。
+ * 3. 强制审计：保留强制日志记录功能。
  */
 
 // --- 基础配置 ---
 let mytoken = 'auto'; 
-let adminPassword = 'zyk20031230'; 
+let adminPassword = 'zyk20031230'; // 你的后台密码
 let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6;
 let total = 99; 
@@ -19,7 +19,6 @@ let subProtocol = 'https';
 
 export default {
     async fetch(request, env, ctx) {
-        // console.log("请求进入: " + request.url); // 调试日志
         try {
             const url = new URL(request.url);
             const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
@@ -31,7 +30,7 @@ export default {
                 return new Response(`配置错误：未找到 KV 绑定`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
             
-            // 2. 黑名单
+            // 2. 黑名单拦截
             if (env.KV) {
                 const blIP = (await env.KV.get('BLACKLIST_IPS') || "").split(',');
                 if (blIP.includes(clientIP)) return new Response('Access Denied (IP Blocked).', { status: 403 });
@@ -39,7 +38,7 @@ export default {
                 if (userID !== 'default' && blID.includes(userID)) return new Response('Access Denied (User Blocked).', { status: 403 });
             }
 
-            // 3. 后台管理
+            // 3. 后台管理 API 处理
             if (url.pathname === '/admin_panel') {
                 const pwd = url.searchParams.get('p');
                 if (pwd !== (env.ADMIN_PWD || adminPassword)) return new Response('Unauthorized', { status: 401 });
@@ -47,11 +46,17 @@ export default {
                 const act = url.searchParams.get('action');
                 const val = url.searchParams.get('val');
                 const type = url.searchParams.get('type');
+                
                 if (act && val && env.KV) {
                     const key = type === 'id' ? 'BLACKLIST_IDS' : 'BLACKLIST_IPS';
                     let list = (await env.KV.get(key) || "").split(',').filter(x => x);
-                    if (act === 'block') { if (!list.includes(val)) list.push(val); }
-                    else if (act === 'unblock') { list = list.filter(x => x !== val); }
+                    
+                    if (act === 'block') { 
+                        if (!list.includes(val)) list.push(val); 
+                    } else if (act === 'unblock') { 
+                        list = list.filter(x => x !== val); 
+                    }
+                    
                     await env.KV.put(key, list.join(','));
                     return new Response('Success');
                 }
@@ -72,14 +77,10 @@ export default {
             const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
             const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
 
-            // --- 4. 强制同步审计 (DEBUG 核心) ---
-            // 只要有 KV，不判断 User-Agent，强制写入，并且使用 await 等待写入完成
+            // --- 4. 强制审计日志 ---
             if (isValidRequest && env.KV) {
-                console.log(`正在记录日志: IP=${clientIP}, User=${userID}`); // 调试日志
-                await recordLog(env, clientIP, userID, userAgent, url, request.cf);
-                console.log(`日志写入完成`); // 调试日志
-            } else {
-                console.log(`不记录日志: Valid=${isValidRequest}, KV=${!!env.KV}`);
+                const logPromise = recordLog(env, clientIP, userID, userAgent, url, request.cf);
+                if (ctx && ctx.waitUntil) ctx.waitUntil(logPromise);
             }
 
             // 核心业务
@@ -112,8 +113,6 @@ export default {
                              (url.searchParams.has('sb') || userAgent.includes('sing-box') ? 'singbox' : 'base64');
 
                 let responseContent = "";
-                let contentType = "text/plain; charset=utf-8";
-
                 if (format === 'base64') {
                     responseContent = safeBase64Encode(totalContent);
                 } else {
@@ -124,21 +123,17 @@ export default {
                     if (format === 'clash') responseContent = clashFix(responseContent);
                 }
 
-                // 添加禁止缓存头
                 return new Response(responseContent, { 
                     headers: { 
-                        "content-type": contentType,
+                        "content-type": "text/plain; charset=utf-8",
                         "Profile-Update-Interval": `${SUBUpdateTime}`,
                         "Subscription-Userinfo": `upload=0; download=0; total=${total * 1073741824}; expire=${timestamp / 1000}`,
-                        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // 强制不缓存
-                        "Pragma": "no-cache",
-                        "Expires": "0"
+                        "Cache-Control": "no-store, no-cache, must-revalidate",
                     } 
                 });
             }
         } catch (e) {
-            console.error(e); // 报错输出到后台
-            return new Response(`Error: ${e.message}\n${e.stack}`, { status: 500 });
+            return new Response(`Error: ${e.message}`, { status: 500 });
         }
     }
 };
@@ -146,17 +141,14 @@ export default {
 // --- 工具函数 ---
 async function recordLog(env, ip, userID, ua, url, cf) {
     try {
-        const logKey = `LOG_${Date.now()}_${Math.random().toString(36).substring(7)}`; // 防止Key冲突
+        const logKey = `LOG_${Date.now()}_${Math.random().toString(36).substring(7)}`;
         const logData = {
             time: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
-            ip: ip, 
-            loc: cf ? `${cf.country || ''}-${cf.city || ''}` : 'Unknown',
-            user: userID, 
-            ua: ua, 
-            path: url.pathname + url.search
+            ip: ip, loc: cf ? `${cf.country || ''}-${cf.city || ''}` : 'Unknown',
+            user: userID, ua: ua, path: url.pathname + url.search
         };
         await env.KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
-    } catch(e) { console.error("KV Write Error: " + e.message); }
+    } catch(e) {}
 }
 
 async function handleAdminPanel(env) {
@@ -165,19 +157,88 @@ async function handleAdminPanel(env) {
     const blID = (await env.KV.get('BLACKLIST_IDS') || "").split(',');
     
     let logs = [];
+    // 1. 获取日志并排序
     for (const key of list.keys) {
         const val = await env.KV.get(key.name);
         if (val) logs.push(JSON.parse(val));
     }
     logs.sort((a, b) => new Date(b.time) - new Date(a.time));
 
+    // 2. 核心逻辑：分析多IP用户
+    const userIpMap = {};
+    logs.forEach(l => {
+        if (l.user && l.user !== 'default') {
+            if (!userIpMap[l.user]) userIpMap[l.user] = new Set();
+            userIpMap[l.user].add(l.ip);
+        }
+    });
+    
+    // 筛选出 IP 数 > 1 的用户
+    const multiIpUsers = Object.entries(userIpMap)
+        .filter(([_, ips]) => ips.size > 1)
+        .map(([u, ips]) => ({ user: u, count: ips.size, ips: Array.from(ips) }));
+
     return new Response(`
-    <!DOCTYPE html><html><head><title>调试后台</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>body{font-family:sans-serif;background:#f4f7f9;padding:20px}.card{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:1200px;margin:auto}table{width:100%;border-collapse:collapse;margin-top:15px}th,td{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:13px}th{background:#007bff;color:white}.btn{padding:4px 8px;border:none;border-radius:4px;color:white;cursor:pointer;font-size:12px;margin-right:5px}.block{background:#dc3545}.unblock{background:#28a745}.tag{padding:2px 5px;border-radius:3px;font-size:11px;background:#e9ecef;color:#495057}.b-tag{background:#dc3545;color:white}</style></head>
-    <body><div class="card">
-        <h2>📊 节点使用审计 (DEBUG模式)</h2>
-        <p>如果这里有数据，说明 KV 写入正常。如果 v2rayN 更新成功但这里没数据，请看 Cloudflare 实时日志。</p>
-        <table><thead><tr><th>时间</th><th>用户ID</th><th>IP地址</th><th>客户端UA</th><th>操作</th></tr></thead>
+    <!DOCTYPE html><html><head><title>管理后台</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body{font-family:sans-serif;background:#f4f7f9;padding:20px}
+        .card{background:white;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:1200px;margin:auto;margin-bottom:20px;}
+        table{width:100%;border-collapse:collapse;margin-top:15px}
+        th,td{padding:10px;border-bottom:1px solid #eee;text-align:left;font-size:13px}
+        th{background:#007bff;color:white}
+        .btn{padding:5px 10px;border:none;border-radius:4px;color:white;cursor:pointer;font-size:12px;margin-right:5px}
+        .block{background:#dc3545}.unblock{background:#28a745}
+        .input-group {display:flex; gap:10px; margin-top:10px; align-items: center;}
+        input, select {padding: 8px; border:1px solid #ddd; border-radius:4px;}
+        .tag{padding:2px 5px;border-radius:3px;font-size:11px;background:#e9ecef;color:#495057}.b-tag{background:#dc3545;color:white}
+        .warn-card {border-left: 5px solid #ffc107;}
+        .warn-title {color: #d39e00; font-weight: bold; display: flex; align-items: center; gap: 5px;}
+    </style></head>
+    <body>
+    
+    ${multiIpUsers.length > 0 ? `
+    <div class="card warn-card">
+        <h2 class="warn-title">⚠️ 异常检测：发现一号多用</h2>
+        <p>以下 ID 在记录中使用了多个不同的 IP 地址，可能存在分享行为：</p>
+        <table>
+            <thead><tr><th>用户ID</th><th>IP数量</th><th>使用过的IP</th><th>操作</th></tr></thead>
+            <tbody>
+                ${multiIpUsers.map(m => `
+                <tr style="background:#fff3cd">
+                    <td style="font-weight:bold;color:#856404">${m.user}</td>
+                    <td style="font-weight:bold;color:#dc3545">${m.count} 个</td>
+                    <td style="font-size:11px;color:#666">${m.ips.join('<br>')}</td>
+                    <td>
+                        ${!blID.includes(m.user) ? 
+                        `<button class="btn block" onclick="doAct('block','${m.user}','id')">立即封ID</button>` : 
+                        `<span class="tag b-tag">已封禁</span>`}
+                    </td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>` : ''}
+
+    <div class="card">
+        <h2>🔨 手动封禁 / 解封</h2>
+        <div class="input-group">
+            <input type="text" id="manualVal" placeholder="输入 ID (如 zhangsan) 或 IP" style="flex:1">
+            <select id="manualType">
+                <option value="id">封禁/解封 用户ID</option>
+                <option value="ip">封禁/解封 IP地址</option>
+            </select>
+            <button class="btn block" onclick="manualAct('block')">⛔ 立即封禁</button>
+            <button class="btn unblock" onclick="manualAct('unblock')">✅ 立即解封</button>
+        </div>
+        <div style="margin-top:15px; font-size:12px; color:#666;">
+            <strong>当前封禁ID:</strong> ${blID.filter(x=>x).join(', ') || '无'}<br>
+            <strong>当前封禁IP:</strong> ${blIP.filter(x=>x).join(', ') || '无'}
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>📊 审计日志 (最近100条)</h2>
+        <table><thead><tr><th>时间</th><th>用户ID</th><th>IP地址</th><th>客户端UA</th><th>快捷操作</th></tr></thead>
         <tbody>${logs.map(l => {
             const isBlockID = blID.includes(l.user);
             const isBlockIP = blIP.includes(l.ip);
@@ -195,7 +256,22 @@ async function handleAdminPanel(env) {
             </tr>`
         }).join('')}</tbody></table>
     </div>
-    <script>async function doAct(act, val, type){if(confirm('确定对 ['+val+'] 执行 ['+act+'] 吗?')){const u=new URL(window.location.href);u.searchParams.set('action',act);u.searchParams.set('val',val);u.searchParams.set('type',type);await fetch(u);location.reload();}}</script></body></html>`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+    
+    <script>
+    async function doAct(act, val, type){
+        if(confirm('确定对 ['+val+'] 执行 ['+act+'] 吗?')){
+            const u=new URL(window.location.href);
+            u.searchParams.set('action',act);u.searchParams.set('val',val);u.searchParams.set('type',type);
+            await fetch(u);location.reload();
+        }
+    }
+    async function manualAct(act) {
+        const val = document.getElementById('manualVal').value.trim();
+        const type = document.getElementById('manualType').value;
+        if(!val) return alert('请输入内容！');
+        await doAct(act, val, type);
+    }
+    </script></body></html>`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
 async function getSUB(api, request, 追加UA, userAgentHeader) {
@@ -217,7 +293,6 @@ async function MD5MD5(text) { const data = new TextEncoder().encode(text); const
 async function ADD(envadd) { return (envadd || "").split(/[	"'|\r\n]+/).filter(x => x.trim() !== ""); }
 function clashFix(content) { return content.replace(/mtu: 1280, udp: true/g, 'mtu: 1280, remote-dns-resolve: true, udp: true'); }
 async function nginx() { return `<h1>Welcome</h1>`; }
-async function sendMessage(token, id, type, ip, data = "") { if (!token || !id) return; try { await fetch(`https://api.telegram.org/bot${token}/sendMessage?chat_id=${id}&text=${encodeURIComponent(type + '\nIP: ' + ip + '\n' + data)}`); } catch (e) {} }
 async function KV(request, env, txt, mytoken) {
     const url = new URL(request.url);
     if (request.method === "POST") { await env.KV.put(txt, await request.text()); return new Response("保存成功"); }
