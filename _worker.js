@@ -7,7 +7,7 @@
 
 // --- 基础配置 ---
 let mytoken = 'auto'; 
-let adminPassword = 'admin'; // 后台密码
+let adminPassword = 'zyk20031230'; // 后台密码
 let FileName = 'CF-Workers-SUB';
 let SUBUpdateTime = 6;
 let total = 99; 
@@ -231,3 +231,4 @@ async function KV(request, env, txt, mytoken) {
     let content = await env.KV.get(txt) || '';
     return new Response(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="padding:20px;"><h2>节点编辑</h2><p>订阅地址: <code>https://${url.hostname}/${mytoken}</code></p><textarea id="c" style="width:100%;height:400px;border:1px solid #ccc;padding:10px;">${content}</textarea><br><button onclick="save()" style="padding:10px 20px;background:#28a745;color:white;border:none;cursor:pointer;">保存配置</button><script>function save(){fetch(window.location.href,{method:'POST',body:document.getElementById('c').value}).then(r=>r.text()).then(t=>alert(t));}</script></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
+
