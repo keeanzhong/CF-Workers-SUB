@@ -1,13 +1,13 @@
 // ================================================================
-// 1. 用户配置区域 (即便这里写了，也会优先读取环境变量)
+// 1. 用户配置区域
 // ================================================================
 const defaultUUID = '90204786-9045-420c-b2b9-293026330025'; // 默认 UUID
 const proxyIP = ''; // 优选 IP，留空自动
 const adminPath = '/admin'; // 管理后台路径
-const adminKey = 'MySecretKey123'; // <--- 【重要】请修改这个管理密码
+const adminKey = 'zyk20031230'; // <--- 【重要】请修改这个管理密码
 
 // ================================================================
-// 2. 备用节点列表 (保留原版长列表，防止连接失败)
+// 2. 备用节点列表
 // ================================================================
 let addresses = [
 	'www.visa.com.sg',
@@ -95,6 +95,7 @@ export default {
 			<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
 			<p><em>Client IP: ${clientIP}</em></p>
 			<p><em>UUID: ${userID}</em></p>
+            <p><em>DB Status: ${DB ? 'Connected' : 'Not Connected'}</em></p>
 			</body>
 			</html>`, {
 				status: 200,
