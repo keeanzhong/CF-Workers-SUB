@@ -4,7 +4,7 @@
 const defaultUUID = '90204786-9045-420c-b2b9-293026330025'; // 默认 UUID
 const proxyIP = ''; // 优选 IP，留空自动
 const adminPath = '/admin'; // 管理后台路径
-const adminKey = 'MySecretKey123'; // <--- 【重要】请修改这个管理密码
+const adminKey = 'zyk20031230'; // <--- 【重要】请修改这个管理密码
 
 // ================================================================
 // 2. 备用节点列表 (完整版，保留所有备用路径)
@@ -386,3 +386,4 @@ function safeCloseWebSocket(socket) {
 	try { if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) socket.close(); } 
 	catch (error) { console.error('safeCloseWebSocket error', error); }
 }
+
