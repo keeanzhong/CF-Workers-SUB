@@ -592,3 +592,4 @@ async function KVEditor(request, env, txt, mytoken) {
     </script>
   </body></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", 'cache-control': 'no-store' } });
 }
+
