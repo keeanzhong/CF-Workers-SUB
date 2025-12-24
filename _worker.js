@@ -356,3 +356,4 @@ async function KVPage(request, KV, txt, mytoken) {
     let content = await KV.get(txt) || '';
     return new Response(`<!DOCTYPE html><html><body style="padding:20px;"><h2>节点编辑</h2><p>订阅: <code>${url.origin}/${mytoken}</code></p><textarea id="c" style="width:100%;height:400px;">${content}</textarea><br><button onclick="save()">保存</button><script>function save(){fetch(window.location.href,{method:'POST',body:document.getElementById('c').value}).then(r=>r.text()).then(t=>alert(t));}</script></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
+
