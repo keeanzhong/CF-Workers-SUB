@@ -1,12 +1,15 @@
 /**
- * CF-Workers-SUB 旗舰管理版 (修复+增强版)
- * 1. 还原：完全保留原版订阅处理逻辑，确保节点正常显示。
- * 2. 修复：解决 env is not defined 部署报错。
- * 3. 新增：搜索、管理员豁免、双重封禁。
+ * CF-Workers-SUB 旗舰管理版 (修复+功能增强版)
+ * 核心功能：订阅管理、节点转换
+ * 新增功能：
+ * 1. 后台搜索 (ID/IP)
+ * 2. 一号多用检测 (管理员IP自动豁免)
+ * 3. 异常检测列表中支持 [封IP] 和 [封号]
+ * 4. 修复 env 启动报错
  */
 
-// --- 静态默认配置 (这里不读 env，防止报错) ---
-const DEFAULTS = {
+// --- 基础静态配置 (默认值) ---
+const DEFAULT_CONFIG = {
     mytoken: 'auto',
     adminPassword: 'zyk20031230',
     FileName: 'CF-Workers-SUB',
@@ -23,98 +26,109 @@ export default {
     async fetch(request, env, ctx) {
         try {
             // =========================================================
-            // 1. 变量初始化 (必须在 fetch 内部读取 env)
+            // 1. 变量初始化 (必须在 fetch 内部读取，修复 522/1101 报错)
             // =========================================================
-            let mytoken = env.TOKEN || DEFAULTS.mytoken;
-            let adminPassword = env.ADMIN_PWD || DEFAULTS.adminPassword;
-            let FileName = env.SUBNAME || DEFAULTS.FileName;
-            let MainData = env.LINK || DEFAULTS.MainData;
-            let subConverter = env.SUBAPI || DEFAULTS.subConverter;
-            let subConfig = env.SUBCONFIG || DEFAULTS.subConfig;
-            let subProtocol = DEFAULTS.subProtocol;
+            // 优先读取环境变量，没有则使用上面定义的默认值
+            let mytoken = env.TOKEN || DEFAULT_CONFIG.mytoken;
+            let adminPassword = env.ADMIN_PWD || DEFAULT_CONFIG.adminPassword;
+            let FileName = env.SUBNAME || DEFAULT_CONFIG.FileName;
+            let MainData = env.LINK || DEFAULT_CONFIG.MainData;
+            let subConverter = env.SUBAPI || DEFAULT_CONFIG.subConverter;
+            let subConfig = env.SUBCONFIG || DEFAULT_CONFIG.subConfig;
+            let subProtocol = DEFAULT_CONFIG.subProtocol;
             
-            const KV = env.KV; // 你的 KV 绑定
+            // TG 推送配置
+            let BotToken = env.TGTOKEN || '';
+            let ChatID = env.TGID || '';
+            let TG = env.TG || 0;
+
             const url = new URL(request.url);
             const clientIP = request.headers.get('CF-Connecting-IP') || '0.0.0.0';
-            const userAgent = (request.headers.get('User-Agent') || "Unknown").toLowerCase();
+            const userAgentHeader = request.headers.get('User-Agent') || "Unknown";
+            const userAgent = userAgentHeader.toLowerCase();
             const userID = url.searchParams.get('id') || url.searchParams.get('user') || 'default';
 
             // =========================================================
-            // 2. 检查 KV (防止报错)
+            // 2. 检查 KV 绑定
             // =========================================================
-            if (!KV && url.pathname === '/admin_panel') {
-                return new Response(`配置错误：未找到 KV 绑定。请在后台 Variables 绑定 KV 命名空间，变量名必须为 KV`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+            if (!env.KV && url.pathname === '/admin_panel') {
+                return new Response(`配置错误：未找到 KV 绑定。请在后台 Settings -> Variables 绑定 KV 命名空间，变量名必须为 KV`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
             // =========================================================
-            // 3. 黑名单拦截
+            // 3. 黑名单拦截 (极速)
             // =========================================================
-            if (KV) {
-                const blIP = (await KV.get('BLACKLIST_IPS') || "").split(',');
+            if (env.KV) {
+                const blIP = (await env.KV.get('BLACKLIST_IPS') || "").split(',');
                 if (blIP.includes(clientIP)) return new Response('Access Denied (IP Blocked).', { status: 403 });
-                const blID = (await KV.get('BLACKLIST_IDS') || "").split(',');
+                const blID = (await env.KV.get('BLACKLIST_IDS') || "").split(',');
                 if (userID !== 'default' && blID.includes(userID)) return new Response('Access Denied (User Blocked).', { status: 403 });
             }
 
             // =========================================================
-            // 4. 后台管理 API
+            // 4. 后台管理 API (处理封禁/解封请求)
             // =========================================================
             if (url.pathname === '/admin_panel') {
                 const pwd = url.searchParams.get('p');
                 if (pwd !== adminPassword) return new Response('Unauthorized', { status: 401 });
-
+                
                 const act = url.searchParams.get('action');
                 const val = url.searchParams.get('val');
                 const type = url.searchParams.get('type');
-
-                if (act && val && KV) {
+                
+                if (act && val && env.KV) {
                     const key = type === 'id' ? 'BLACKLIST_IDS' : 'BLACKLIST_IPS';
-                    let list = (await KV.get(key) || "").split(',').filter(x => x);
-
-                    if (act === 'block') {
-                        if (!list.includes(val)) list.push(val);
-                    } else if (act === 'unblock') {
-                        list = list.filter(x => x !== val);
+                    let list = (await env.KV.get(key) || "").split(',').filter(x => x);
+                    
+                    if (act === 'block') { 
+                        if (!list.includes(val)) list.push(val); 
+                    } else if (act === 'unblock') { 
+                        list = list.filter(x => x !== val); 
                     }
-
-                    await KV.put(key, list.join(','));
+                    
+                    await env.KV.put(key, list.join(','));
                     return new Response('Success');
                 }
-                // 渲染后台页面
-                return await handleAdminPanel(KV);
+                // 渲染带有新功能的后台页面
+                return await handleAdminPanel(env);
             }
 
             // =========================================================
-            // 5. 核心业务逻辑 (保留原版订阅处理)
+            // 5. Token 计算与验证
             // =========================================================
-            
-            // Token 计算
             const token = url.searchParams.get('token');
-            const fakeToken = await MD5MD5(`${mytoken}${Math.ceil(new Date().setHours(0, 0, 0, 0) / 1000)}`);
+            const fakeToken = await MD5MD5(`${mytoken}${Math.ceil(new Date().setHours(0,0,0,0) / 1000)}`);
             const guestToken = env.GUESTTOKEN || await MD5MD5(mytoken);
             const isValidRequest = [mytoken, fakeToken, guestToken].includes(token) || url.pathname == ("/" + mytoken);
 
-            // 强制审计日志
-            if (isValidRequest && KV) {
+            // =========================================================
+            // 6. 强制审计日志 (不阻塞主线程)
+            // =========================================================
+            if (isValidRequest && env.KV) {
                 if (ctx && ctx.waitUntil) {
-                    ctx.waitUntil(recordLog(KV, clientIP, userID, userAgent, url, request.cf));
+                    ctx.waitUntil(recordLog(env, clientIP, userID, userAgentHeader, url, request.cf));
                 }
             }
 
-            // 处理请求
+            // =========================================================
+            // 7. 核心业务逻辑 (你原来的订阅处理代码)
+            // =========================================================
             if (!isValidRequest) {
-                // 如果没有 Token，跳转或显示首页
+                // 异常访问
+                if (TG == 1 && url.pathname !== "/" && url.pathname !== "/favicon.ico") {
+                    // await sendMessage(BotToken, ChatID, `#异常访问`, clientIP, `UA: ${userAgentHeader}\n路径: ${url.pathname}`);
+                }
                 if (env.URL302) return Response.redirect(env.URL302, 302);
                 return new Response(await nginx(), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
             } else {
-                // 1. 如果是浏览器直接访问，进入简易编辑器
-                if (KV && userAgent.includes('mozilla') && !url.search) {
-                    return await KVPage(request, KV, 'LINK.txt', mytoken);
+                // 简易节点编辑页面 (浏览器直接访问)
+                if (env.KV && userAgent.includes('mozilla') && !url.search) {
+                    return await KVPage(request, env, 'LINK.txt', mytoken);
                 }
 
-                // 2. 获取并处理订阅数据 (核心逻辑，保留原版)
-                let finalData = (KV ? await KV.get('LINK.txt') : env.LINK) || MainData;
-                let links = await ADD(finalData); // 调用原版 ADD 函数
+                // --- 核心订阅生成逻辑 (完全保留) ---
+                let finalData = (env.KV ? await env.KV.get('LINK.txt') : env.LINK) || MainData;
+                let links = await ADD(finalData);
                 
                 let v2rayNodes = ""; 
                 let subLinks = [];
@@ -126,15 +140,15 @@ export default {
                 let remoteNodes = "";
                 let subConverterURLPart = "";
                 if (subLinks.length > 0) {
-                    const subResult = await getSUB(subLinks, request, "v2rayn", userAgent);
+                    const subResult = await getSUB(subLinks, request, "v2rayn", userAgentHeader);
                     remoteNodes = subResult[0].join('\n');
                     subConverterURLPart = subResult[1];
                 }
 
                 let totalContent = v2rayNodes + remoteNodes;
                 
-                // 格式转换 (Clash / Singbox / Base64)
-                let format = url.searchParams.has('clash') || userAgent.includes('clash') ? 'clash' :
+                // 格式输出判断
+                let format = url.searchParams.has('clash') || userAgent.includes('clash') ? 'clash' : 
                              (url.searchParams.has('sb') || userAgent.includes('sing-box') ? 'singbox' : 'base64');
 
                 let responseContent = "";
@@ -145,40 +159,38 @@ export default {
                     let convertUrl = `${subProtocol}://${subConverter}/sub?target=${format}&url=${encodeURIComponent(subURL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
                     
                     try {
-                        const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgent } });
-                        if (subResp.ok) {
+                        const subResp = await fetch(convertUrl, { headers: { 'User-Agent': userAgentHeader } });
+                        if(subResp.ok) {
                             responseContent = await subResp.text();
                             if (format === 'clash') responseContent = clashFix(responseContent);
                         } else {
-                            // 转换失败回退到 Base64
-                            responseContent = safeBase64Encode(totalContent);
+                            responseContent = safeBase64Encode(totalContent); // 转换失败降级
                         }
-                    } catch (e) {
+                    } catch(e) {
                         responseContent = safeBase64Encode(totalContent);
                     }
                 }
 
-                return new Response(responseContent, {
-                    headers: {
+                return new Response(responseContent, { 
+                    headers: { 
                         "content-type": "text/plain; charset=utf-8",
-                        "Profile-Update-Interval": `${DEFAULTS.SUBUpdateTime}`,
-                        "Subscription-Userinfo": `upload=0; download=0; total=${DEFAULTS.total * 1073741824}; expire=${DEFAULTS.timestamp / 1000}`,
+                        "Profile-Update-Interval": `${DEFAULT_CONFIG.SUBUpdateTime}`,
+                        "Subscription-Userinfo": `upload=0; download=0; total=${DEFAULT_CONFIG.total * 1073741824}; expire=${DEFAULT_CONFIG.timestamp / 1000}`,
                         "Cache-Control": "no-store, no-cache, must-revalidate",
-                    }
+                    } 
                 });
             }
-
         } catch (e) {
-            return new Response(`Worker Error: ${e.message}\nStack: ${e.stack}`, { status: 200 }); // 返回200防止522
+            return new Response(`Worker Error: ${e.message}\nStack: ${e.stack}`, { status: 500 });
         }
     }
 };
 
 // =========================================================
-// 辅助函数 (完整保留)
+// 辅助函数区域 (包含后台渲染逻辑)
 // =========================================================
 
-async function recordLog(KV, ip, userID, ua, url, cf) {
+async function recordLog(env, ip, userID, ua, url, cf) {
     try {
         const logKey = `LOG_${Date.now()}_${Math.random().toString(36).substring(7)}`;
         const logData = {
@@ -186,25 +198,25 @@ async function recordLog(KV, ip, userID, ua, url, cf) {
             ip: ip, loc: cf ? `${cf.country || ''}-${cf.city || ''}` : 'Unknown',
             user: userID, ua: ua, path: url.pathname + url.search
         };
-        await KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
-    } catch (e) {}
+        await env.KV.put(logKey, JSON.stringify(logData), { expirationTtl: 604800 });
+    } catch(e) {}
 }
 
-async function handleAdminPanel(KV) {
-    const list = await KV.list({ prefix: 'LOG_', limit: 100 });
-    const blIP = (await KV.get('BLACKLIST_IPS') || "").split(',');
-    const blID = (await KV.get('BLACKLIST_IDS') || "").split(',');
-
+async function handleAdminPanel(env) {
+    const list = await env.KV.list({ prefix: 'LOG_', limit: 100 });
+    const blIP = (await env.KV.get('BLACKLIST_IPS') || "").split(',');
+    const blID = (await env.KV.get('BLACKLIST_IDS') || "").split(',');
+    
     let logs = [];
-    let adminIPs = new Set(); 
+    let adminIPs = new Set(); // 存储被识别为管理员的IP
 
-    // 获取日志并识别管理员
+    // 1. 获取日志并识别管理员
     for (const key of list.keys) {
-        const val = await KV.get(key.name);
+        const val = await env.KV.get(key.name);
         if (val) {
             const log = JSON.parse(val);
             logs.push(log);
-            // 只要访问过后台，自动标记为管理员
+            // 如果访问路径包含 admin_panel，则自动标记该IP为管理员
             if (log.path && log.path.includes('/admin_panel')) {
                 adminIPs.add(log.ip);
             }
@@ -212,46 +224,54 @@ async function handleAdminPanel(KV) {
     }
     logs.sort((a, b) => new Date(b.time) - new Date(a.time));
 
-    // 分析一号多用 (排除管理员IP)
+    // 2. 核心逻辑：分析多IP用户 (自动排除管理员IP)
     const userIpMap = {};
     logs.forEach(l => {
+        // 条件：是有效用户 + 不是默认用户 + IP不是管理员IP
         if (l.user && l.user !== 'default' && !adminIPs.has(l.ip)) {
             if (!userIpMap[l.user]) userIpMap[l.user] = new Set();
             userIpMap[l.user].add(l.ip);
         }
     });
-
+    
+    // 筛选出 IP 数 > 1 的用户
     const multiIpUsers = Object.entries(userIpMap)
         .filter(([_, ips]) => ips.size > 1)
         .map(([u, ips]) => ({ user: u, count: ips.size, ips: Array.from(ips) }));
 
-    const html = `
+    return new Response(`
     <!DOCTYPE html><html><head><title>Admin Panel</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body{font-family:sans-serif;background:#f4f7f9;padding:20px;color:#333;font-size:14px;}
+        body{font-family:'Segoe UI', sans-serif;background:#f4f7f9;padding:20px;color:#333;font-size:14px;}
         .card{background:white;padding:20px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:20px;}
         h3{margin:0 0 15px 0;border-bottom:1px solid #eee;padding-bottom:10px;color:#444;}
-        table{width:100%;border-collapse:collapse;}
+        table{width:100%;border-collapse:collapse;margin-top:10px}
         th,td{padding:10px;border-bottom:1px solid #eee;text-align:left;}
-        th{background:#fafafa;font-weight:600;}
-        input,select{padding:8px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;}
-        .search-box{width:100%;margin-bottom:15px;}
-        .btn{padding:5px 10px;border:none;border-radius:4px;color:white;cursor:pointer;margin-right:5px;}
+        th{background:#fafafa;color:#666;font-weight:600;}
+        tr:hover{background:#f9f9f9;}
+        
+        .btn{padding:5px 10px;border:none;border-radius:4px;color:white;cursor:pointer;font-size:12px;margin-right:5px;transition:0.2s;}
+        .btn:hover{opacity:0.9}
         .block{background:#ff4d4f}.unblock{background:#52c41a}
-        .tag{padding:2px 6px;border-radius:4px;font-size:11px;background:#f0f0f0;color:#666;}
+        
+        .tag{padding:2px 6px;border-radius:4px;font-size:11px;background:#f5f5f5;color:#666;border:1px solid #d9d9d9;}
         .b-tag{background:#fff1f0;color:#cf1322;border:1px solid #ffa39e;}
         .a-tag{background:#f6ffed;color:#389e0d;border:1px solid #b7eb8f;}
+        
         .warn{color:#d46b08;font-weight:bold;}
-        .ip-ban-btn{color:#ff4d4f;cursor:pointer;margin-left:5px;font-weight:bold;text-decoration:none;}
-        .ip-ban-btn:hover{text-decoration:underline;}
+        .ip-ban-btn{color:#ff4d4f;cursor:pointer;margin-left:5px;font-weight:bold;text-decoration:none;border:1px solid #ff4d4f;padding:0 3px;border-radius:3px;font-size:10px;}
+        .ip-ban-btn:hover{background:#ff4d4f;color:white;}
+        
+        .search-box{width:100%;padding:10px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;margin-bottom:10px;}
+        .ip-list-item{display:inline-block; margin-right:8px; margin-bottom:4px;}
     </style></head>
     <body><div style="max-width:1200px;margin:auto;">
         
         <div class="card">
             <h3>🔍 搜索与控制</h3>
-            <input type="text" id="searchInput" class="search-box" onkeyup="searchTable()" placeholder="输入 ID 或 IP 筛选...">
-            <div style="display:flex;gap:10px;">
-                <input type="text" id="manualVal" placeholder="ID 或 IP" style="padding:8px;border:1px solid #ddd;border-radius:4px;flex:1;">
+            <input type="text" id="searchInput" class="search-box" onkeyup="searchTable()" placeholder="输入 ID 或 IP 实时筛选...">
+            <div style="display:flex;gap:10px;margin-top:10px;">
+                <input type="text" id="manualVal" placeholder="输入 ID 或 IP" style="padding:8px;border:1px solid #ddd;border-radius:4px;flex:1;">
                 <select id="manualType" style="padding:8px;border:1px solid #ddd;border-radius:4px;">
                     <option value="id">用户ID</option><option value="ip">IP地址</option>
                 </select>
@@ -263,9 +283,9 @@ async function handleAdminPanel(KV) {
 
         ${multiIpUsers.length > 0 ? `
         <div class="card" style="border-left:4px solid #faad14;">
-            <h3 style="margin-top:0;color:#d46b08;">⚠️ 一号多用检测 (已自动豁免管理员)</h3>
+            <h3 style="color:#d46b08;">⚠️ 一号多用检测 (已自动豁免管理员)</h3>
             <table id="multiTable">
-                <thead><tr><th>用户ID</th><th>IP数</th><th>关联IP (点击红色IP封禁)</th><th>账号操作</th></tr></thead>
+                <thead><tr><th>用户ID</th><th>IP数</th><th>关联IP (点击封禁)</th><th>账号操作</th></tr></thead>
                 <tbody>
                     ${multiIpUsers.map(m => `
                     <tr>
@@ -273,10 +293,10 @@ async function handleAdminPanel(KV) {
                         <td><span class="tag b-tag">${m.count}</span></td>
                         <td>
                             ${m.ips.map(ip => `
-                                <div style="margin:2px 0;">
+                                <div class="ip-list-item">
                                     ${ip} 
                                     ${!blIP.includes(ip) ? 
-                                    `<span class="ip-ban-btn" onclick="doAct('block','${ip}','ip')">❌封IP</span>` : 
+                                    `<span class="ip-ban-btn" onclick="doAct('block','${ip}','ip')" title="封禁此IP">封IP</span>` : 
                                     `<span class="tag b-tag">已封</span>`}
                                 </div>
                             `).join('')}
@@ -292,7 +312,7 @@ async function handleAdminPanel(KV) {
         </div>` : ''}
 
         <div class="card">
-            <h3 style="margin-top:0;">📊 访问日志</h3>
+            <h3>📊 访问日志</h3>
             <table id="logTable">
                 <thead><tr><th>时间</th><th>用户ID</th><th>IP / 归属</th><th>UA</th><th>操作</th></tr></thead>
                 <tbody>${logs.map(l => {
@@ -333,13 +353,12 @@ async function handleAdminPanel(KV) {
             }
         });
     }
-    </script></body></html>`;
-    return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+    </script></body></html>`, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
-// ------------------------------------------
-// 原版核心工具函数 (确保节点生成逻辑不变)
-// ------------------------------------------
+// ---------------------------------------------------------------
+// 原始功能函数 (getSUB, ADD, safeBase64... 保持不变，确保订阅正常)
+// ---------------------------------------------------------------
 
 async function getSUB(api, request, 追加UA, userAgentHeader) {
     let newapi = []; let subURLs = "";
@@ -360,9 +379,9 @@ async function MD5MD5(text) { const data = new TextEncoder().encode(text); const
 async function ADD(envadd) { return (envadd || "").split(/[	"'|\r\n]+/).filter(x => x.trim() !== ""); }
 function clashFix(content) { return content.replace(/mtu: 1280, udp: true/g, 'mtu: 1280, remote-dns-resolve: true, udp: true'); }
 async function nginx() { return `<h1>Welcome to nginx!</h1>`; }
-async function KVPage(request, KV, txt, mytoken) {
+async function KVPage(request, env, txt, mytoken) {
     const url = new URL(request.url);
-    if (request.method === "POST") { await KV.put(txt, await request.text()); return new Response("保存成功"); }
-    let content = await KV.get(txt) || '';
+    if (request.method === "POST") { await env.KV.put(txt, await request.text()); return new Response("保存成功"); }
+    let content = await env.KV.get(txt) || '';
     return new Response(`<!DOCTYPE html><html><body style="padding:20px;"><h2>节点编辑</h2><p>订阅: <code>${url.origin}/${mytoken}</code></p><textarea id="c" style="width:100%;height:400px;">${content}</textarea><br><button onclick="save()">保存</button><script>function save(){fetch(window.location.href,{method:'POST',body:document.getElementById('c').value}).then(r=>r.text()).then(t=>alert(t));}</script></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
